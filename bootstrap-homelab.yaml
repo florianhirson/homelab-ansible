@@ -1,0 +1,206 @@
+---
+- name: Bootstrap Debian nodes with base packages, Docker, SSH hardening, and K3s
+  hosts: all_nodes
+  become: true
+  vars:
+    # Path on the Ansible control machine to your public key to deploy
+    ssh_public_key_path: "~/.ssh/id_rsa.pub"
+    # Optionally pin K3s version (e.g., "v1.30.4+k3s1"); leave empty for latest
+    k3s_version: ""
+    # Base packages to install
+    base_packages:
+      - curl
+      - git
+      - nano
+      - vim
+      - htop
+      - sudo
+      - ca-certificates
+      - gnupg
+      - lsb-release
+      - apt-transport-https
+      - software-properties-common
+  handlers:
+    - name: restart ssh
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+      listen: restart ssh
+
+  tasks:
+    - name: Ensure APT cache is up to date
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Upgrade all packages to the latest version
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: true
+        autoclean: true
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name: "{{ base_packages }}"
+        state: present
+
+    - name: Configure passwordless sudo for ansible_user
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ ansible_user }}"
+        owner: root
+        group: root
+        mode: '0440'
+        content: "{{ ansible_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        validate: 'visudo -cf %s'
+      when: ansible_user is defined
+
+    - name: Create .ssh directory for user
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.ssh"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0700'
+
+    - name: Read local SSH public key
+      ansible.builtin.set_fact:
+        ssh_pubkey_content: "{{ lookup('file', ssh_public_key_path) }}"
+
+    - name: Authorize SSH public key for user
+      ansible.posix.authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ ssh_pubkey_content }}"
+        state: present
+        manage_dir: false
+
+    - name: Add Docker's official GPG key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/debian/gpg
+        state: present
+
+    - name: Set up Docker repository
+      ansible.builtin.apt_repository:
+        repo: "deb https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker Engine packages
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add user to docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+      when: ansible_user is defined
+
+    - name: Harden SSH - disable password authentication
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*PasswordAuthentication\s+'
+        line: 'PasswordAuthentication no'
+        state: present
+        backrefs: false
+      notify: restart ssh
+
+    - name: Harden SSH - disable challenge-response authentication
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*ChallengeResponseAuthentication\s+'
+        line: 'ChallengeResponseAuthentication no'
+        state: present
+        backrefs: false
+      notify: restart ssh
+
+    - name: Harden SSH - disable root login with password
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*PermitRootLogin\s+'
+        line: 'PermitRootLogin prohibit-password'
+        state: present
+        backrefs: false
+      notify: restart ssh
+
+- name: Install K3s server on control plane
+  hosts: control_plane
+  become: true
+  vars:
+    k3s_version: ""
+  tasks:
+    - name: Determine control plane advertise address
+      ansible.builtin.set_fact:
+        control_plane_ip: "{{ hostvars[inventory_hostname].ansible_host | default(ansible_default_ipv4.address) }}"
+
+    - name: Install K3s server (idempotent, token auto-generated)
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ k3s_version }}" sh -s - server --node-ip {{ control_plane_ip }} --write-kubeconfig-mode 644
+      args:
+        creates: /etc/systemd/system/k3s.service
+
+    - name: Ensure k3s service is enabled and started
+      ansible.builtin.service:
+        name: k3s
+        state: started
+        enabled: true
+
+    - name: Wait for server node token to exist
+      ansible.builtin.wait_for:
+        path: /var/lib/rancher/k3s/server/node-token
+        state: present
+        timeout: 120
+
+    - name: Fetch cluster join token for agents
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_node_token
+
+    - name: Set fact with server-generated token
+      ansible.builtin.set_fact:
+        k3s_server_token: "{{ (k3s_node_token.content | b64decode).strip() }}"
+
+- name: Install K3s agent on worker nodes
+  hosts: workers
+  become: true
+  vars:
+    k3s_version: ""
+  tasks:
+    - name: Get control plane host
+      ansible.builtin.set_fact:
+        control_plane_host: "{{ groups['control_plane'][0] }}"
+
+    - name: Determine server URL
+      ansible.builtin.set_fact:
+        server_url: "https://{{ hostvars[control_plane_host].ansible_host | default(hostvars[control_plane_host].ansible_default_ipv4.address) }}:6443"
+
+    - name: Determine join token from control plane
+      ansible.builtin.set_fact:
+        join_token: "{{ hostvars[control_plane_host].k3s_server_token }}"
+
+    - name: Fail if join token is not available
+      ansible.builtin.fail:
+        msg: "K3s server token not found on control plane; ensure the control plane play ran successfully."
+      when: join_token is not defined or (join_token | length) == 0
+
+    - name: Install K3s agent (idempotent)
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ k3s_version }}" K3S_URL="{{ server_url }}" K3S_TOKEN="{{ join_token }}" sh -s -
+      args:
+        creates: /etc/systemd/system/k3s-agent.service
+
+    - name: Ensure k3s-agent service is enabled and started
+      ansible.builtin.service:
+        name: k3s-agent
+        state: started
+        enabled: true
