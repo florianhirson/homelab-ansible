@@ -1,4 +1,14 @@
 ---
+- name: Add cluster hosts to known_hosts
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Add each host's key
+      ansible.builtin.known_hosts:
+        name: "{{ hostvars[item].ansible_host | default(item) }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan -H ' + (hostvars[item].ansible_host | default(item))) }}"
+      loop: "{{ groups['all'] }}"
+
 - name: Bootstrap Debian nodes with base packages, Docker, SSH hardening, and K3s
   hosts: all_nodes
   become: true
@@ -19,7 +29,6 @@
       - gnupg
       - lsb-release
       - apt-transport-https
-      - software-properties-common
   handlers:
     - name: restart ssh
       ansible.builtin.service:
@@ -72,15 +81,45 @@
         state: present
         manage_dir: false
 
-    - name: Add Docker's official GPG key
-      ansible.builtin.apt_key:
+    - name: Ensure APT keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Docker GPG key (ASCII)
+      ansible.builtin.get_url:
         url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+
+    - name: Convert Docker GPG key to dearmored keyring
+      ansible.builtin.command:
+        cmd: gpg --dearmor -o /etc/apt/keyrings/docker.gpg /etc/apt/keyrings/docker.asc
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Set permissions on Docker keyring
+      ansible.builtin.file:
+        path: /etc/apt/keyrings/docker.gpg
+        mode: '0644'
+
+    - name: Map Ansible arch to dpkg arch
+      ansible.builtin.set_fact:
+        dpkg_arch: >-
+          {{ {'x86_64':'amd64','aarch64':'arm64','armv7l':'armhf','armv6l':'armhf'}
+             .get(ansible_architecture, ansible_architecture) }}
+
+    - name: Add Docker APT repository (signed-by)
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ dpkg_arch }} signed-by=/etc/apt/keyrings/docker.gpg]
+          https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable
         state: present
 
-    - name: Set up Docker repository
-      ansible.builtin.apt_repository:
-        repo: "deb https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
-        state: present
+    - name: Update APT cache after adding Docker repo
+      ansible.builtin.apt:
+        update_cache: true
 
     - name: Install Docker Engine packages
       ansible.builtin.apt:

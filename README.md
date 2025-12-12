@@ -22,7 +22,8 @@ Prerequisites
 - Have a public key available on the control node filesystem (path set by ssh_public_key_path)
 
 Important variables
-- ssh_public_key_path: path on the control node to the public key to deploy (default: ~/.ssh/id_rsa.pub)
+- ssh_public_key_path: path on the control node to the public key to deploy (default: ~/.ssh/id_rsa.pub). This is copied to each node on the first run.
+- ansible_ssh_private_key_file (inventory): path to the private key used by Ansible to connect (default in inventory: ~/.ssh/id_rsa). Adjust to your key (e.g., ~/.ssh/id_ed25519) if needed.
 - k3s_version: optional version pin for K3s (e.g., v1.30.4+k3s1). Leave empty for latest
 
 First run (no SSH keys yet)
@@ -41,6 +42,12 @@ Subsequent runs (key-based)
 After the first successful run, SSH key-based auth will work and you typically won’t need --ask-pass. Because the playbook configures passwordless sudo for the user, you also won’t need --ask-become-pass on subsequent runs.
 
   ansible-playbook -i inventory.ini bootstrap-homelab.yaml
+
+Note on Docker repository setup (apt-key removal)
+Modern Debian/Ubuntu releases removed apt-key. This playbook uses the recommended keyrings + signed-by method to add Docker’s APT repository:
+- places the dearmored Docker key in /etc/apt/keyrings/docker.gpg
+- references it via signed-by in the repo entry
+No extra action is required on your side; this fixes common “Failed to find required executable apt-key” errors.
 
 Pinning K3s version
 Pass k3s_version at runtime or set it in group/host vars:
