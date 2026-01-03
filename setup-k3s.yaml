@@ -1,20 +1,46 @@
 ---
-- name: Uninstall K3s
-  hosts: all_nodes
+- name: Uninstall K3s server
+  hosts: control_plane
   become: true
-  vars:
-    # Path on the Ansible control machine to your public key to deploy
-    ssh_public_key_path: "~/.ssh/id_rsa.pub"
-    # Optionally pin K3s version (e.g., "v1.30.4+k3s1"); leave empty for latest
-    k3s_version: ""
-
   tasks:
     - name: Uninstall K3s server
-      ansible.builtin.shell: sudo /usr/local/bin/k3s-uninstall.sh
+      ansible.builtin.shell: /usr/local/bin/k3s-uninstall.sh
+
     - name: Cleanup
-      ansible.builtin.shell: sudo rm -rf /etc/cni /var/lib/cni /var/lib/kubelet /var/lib/rancher
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cni
+        - /var/lib/cni
+        - /var/lib/kubelet
+        - /var/lib/rancher
+
     - name: Reboot
-      ansible.builtin.shell: sudo reboot
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+
+- name: Uninstall K3s agent
+  hosts: workers
+  become: true
+  tasks:
+    - name: Uninstall K3s agent
+      ansible.builtin.shell: /usr/local/bin/k3s-agent-uninstall.sh
+
+    - name: Cleanup
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cni
+        - /var/lib/cni
+        - /var/lib/kubelet
+        - /var/lib/rancher
+
+    - name: Reboot
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+
 
 - name: Install K3s server on control plane
   hosts: control_plane
