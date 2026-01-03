@@ -1,0 +1,89 @@
+---
+- name: Uninstall K3s
+  hosts: all_nodes
+  become: true
+  vars:
+    # Path on the Ansible control machine to your public key to deploy
+    ssh_public_key_path: "~/.ssh/id_rsa.pub"
+    # Optionally pin K3s version (e.g., "v1.30.4+k3s1"); leave empty for latest
+    k3s_version: ""
+
+  tasks:
+    - name: Uninstall K3s server
+      ansible.builtin.shell: sudo /usr/local/bin/k3s-uninstall.sh
+    - name: Cleanup
+      ansible.builtin.shell: sudo rm -rf /etc/cni /var/lib/cni /var/lib/kubelet /var/lib/rancher
+    - name: Reboot
+      ansible.builtin.shell: sudo reboot
+
+- name: Install K3s server on control plane
+  hosts: control_plane
+  become: true
+  vars:
+    k3s_version: ""
+  tasks:
+    - name: Determine control plane advertise address
+      ansible.builtin.set_fact:
+        control_plane_ip: "{{ hostvars[inventory_hostname].ansible_host | default(ansible_default_ipv4.address) }}"
+
+    - name: Install K3s server (idempotent, token auto-generated)
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ k3s_version }}" sh -s - server --node-ip {{ control_plane_ip }} --write-kubeconfig-mode 644 --disable traefik --disable servicelb --disable flannel
+      args:
+        creates: /etc/systemd/system/k3s.service
+
+    - name: Ensure k3s service is enabled and started
+      ansible.builtin.service:
+        name: k3s
+        state: started
+        enabled: true
+
+    - name: Wait for server node token to exist
+      ansible.builtin.wait_for:
+        path: /var/lib/rancher/k3s/server/node-token
+        state: present
+        timeout: 120
+
+    - name: Fetch cluster join token for agents
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_node_token
+
+    - name: Set fact with server-generated token
+      ansible.builtin.set_fact:
+        k3s_server_token: "{{ (k3s_node_token.content | b64decode).strip() }}"
+
+- name: Install K3s agent on worker nodes
+  hosts: workers
+  become: true
+  vars:
+    k3s_version: ""
+  tasks:
+    - name: Get control plane host
+      ansible.builtin.set_fact:
+        control_plane_host: "{{ groups['control_plane'][0] }}"
+
+    - name: Determine server URL
+      ansible.builtin.set_fact:
+        server_url: "https://{{ hostvars[control_plane_host].ansible_host | default(hostvars[control_plane_host].ansible_default_ipv4.address) }}:6443"
+
+    - name: Determine join token from control plane
+      ansible.builtin.set_fact:
+        join_token: "{{ hostvars[control_plane_host].k3s_server_token }}"
+
+    - name: Fail if join token is not available
+      ansible.builtin.fail:
+        msg: "K3s server token not found on control plane; ensure the control plane play ran successfully."
+      when: join_token is not defined or (join_token | length) == 0
+
+    - name: Install K3s agent (idempotent)
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ k3s_version }}" K3S_URL="{{ server_url }}" K3S_TOKEN="{{ join_token }}" sh -s -
+      args:
+        creates: /etc/systemd/system/k3s-agent.service
+
+    - name: Ensure k3s-agent service is enabled and started
+      ansible.builtin.service:
+        name: k3s-agent
+        state: started
+        enabled: true
