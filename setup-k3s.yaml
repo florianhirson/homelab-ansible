@@ -52,9 +52,17 @@
       ansible.builtin.set_fact:
         control_plane_ip: "{{ hostvars[inventory_hostname].ansible_host | default(ansible_default_ipv4.address) }}"
 
-    - name: Install K3s server (idempotent, token auto-generated)
+    - name: Install K3s server (no CNI / no kube-proxy)
       ansible.builtin.shell: |
-        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ k3s_version }}" sh -s - server --node-ip {{ control_plane_ip }} --write-kubeconfig-mode 644 --disable traefik --disable servicelb --disable flannel
+        curl -sfL https://get.k3s.io | \
+          INSTALL_K3S_VERSION="{{ k3s_version }}" sh -s - server \
+          --node-ip {{ control_plane_ip }} \
+          --write-kubeconfig-mode 644 \
+          --disable traefik \
+          --disable servicelb \
+          --disable metrics-server \
+          --disable-kube-proxy \
+          --disable-flannel
       args:
         creates: /etc/systemd/system/k3s.service
 
