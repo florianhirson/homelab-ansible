@@ -2,6 +2,7 @@
 - name: Uninstall K3s server
   hosts: control_plane
   become: true
+  tags: [uninstall]
   tasks:
     - name: Uninstall K3s server
       ansible.builtin.shell: /usr/local/bin/k3s-uninstall.sh
@@ -23,6 +24,7 @@
 - name: Uninstall K3s agent
   hosts: workers
   become: true
+  tags: [uninstall]
   tasks:
     - name: Uninstall K3s agent
       ansible.builtin.shell: /usr/local/bin/k3s-agent-uninstall.sh
@@ -61,8 +63,10 @@
           --disable traefik \
           --disable servicelb \
           --disable metrics-server \
-          --disable-kube-proxy \
-          --disable-flannel
+          --disable kube-proxy \
+          --disable flannel \
+          --disable-network-policy \
+          --flannel-backend=none
       args:
         creates: /etc/systemd/system/k3s.service
 
